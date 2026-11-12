@@ -240,8 +240,12 @@ function renderPersonalStatusFilter() {
   if ([...select.options].some(option => option.value === selected)) {
     select.value = selected;
   } else {
+    const hadFilter = Boolean(state.personalStatusFilter);
+
     state.personalStatusFilter = '';
     select.value = '';
+
+    if (hadFilter) reloadChatsFromStart();
   }
 }
 
@@ -520,6 +524,7 @@ function renderPersonalStatusControl() {
 
           if (String(state.personalStatusFilter) === option.value) {
             state.personalStatusFilter = '';
+            reloadChatsFromStart();
           }
 
           await loadPersonalStatuses();
@@ -928,6 +933,7 @@ async function handlePersonalStatusDelete(event) {
 
     if (String(state.personalStatusFilter) === statusId) {
       state.personalStatusFilter = '';
+      reloadChatsFromStart();
     }
 
     await loadPersonalStatuses();
@@ -954,6 +960,82 @@ let chatsLoadPromise = null;
 let chatsReloadQueued = false;
 let chatsRefreshTimer = null;
 
+const CHATS_PAGE_SIZE = 50;
+let chatsTotal = 0;
+let chatsGeneration = 0;
+let chatsMorePromise = null;
+
+function chatsHasFilters() {
+  return Boolean(
+    $('chat-search').value.trim() ||
+    state.filter !== 'all' ||
+    state.personalStatusFilter
+  );
+}
+
+function chatsUrl(offset, limit) {
+  const params = new URLSearchParams({
+    offset: String(offset),
+    limit: String(limit)
+  });
+  const query = $('chat-search').value.trim();
+
+  if (query) params.set('q', query);
+  if (state.filter !== 'all') params.set('filter', state.filter);
+  if (state.personalStatusFilter) params.set('status_id', state.personalStatusFilter);
+
+  return `/api/chats?${params}`;
+}
+
+// Next page on scroll; dropped if a full reload started meanwhile.
+async function loadMoreChats() {
+  if (chatsLoadPromise || chatsMorePromise) return;
+  if (state.chats.length >= chatsTotal) return;
+
+  const generation = chatsGeneration;
+
+  chatsMorePromise = (async () => {
+    try {
+      const data = await api(chatsUrl(state.chats.length, CHATS_PAGE_SIZE));
+      if (generation !== chatsGeneration) return;
+
+      // shortcut: offset pages can skip a chat that moved up between requests; the next refresh fixes it
+      const known = new Set(state.chats.map(chat => String(chat.id)));
+      const fresh = (data.chats || []).filter(chat => !known.has(String(chat.id)));
+
+      state.chats = state.chats.concat(fresh);
+      if (data.total != null) chatsTotal = data.total;
+      if (!fresh.length) chatsTotal = state.chats.length;
+
+      renderChats();
+    } catch (error) {
+      console.error('CHATS MORE:', error);
+    }
+  })();
+
+  try {
+    await chatsMorePromise;
+  } finally {
+    chatsMorePromise = null;
+  }
+}
+
+// Filters and search are applied on the server, so a change restarts from page one.
+function reloadChatsFromStart() {
+  state.chats = [];
+  chatsTotal = 0;
+  $('chat-list').scrollTop = 0;
+  void loadChats();
+}
+
+$('chat-list').addEventListener('scroll', () => {
+  const list = $('chat-list');
+
+  if (list.scrollTop + list.clientHeight >= list.scrollHeight - 300) {
+    void loadMoreChats();
+  }
+}, { passive: true });
+
 async function loadChats() {
   if (chatsRefreshTimer) {
     clearTimeout(chatsRefreshTimer);
@@ -971,9 +1053,14 @@ async function loadChats() {
       chatsReloadQueued = false;
 
       try {
-        const data = await api('/api/chats');
+        chatsGeneration += 1;
+
+        // Refresh keeps every page the user already scrolled through.
+        const limit = Math.max(CHATS_PAGE_SIZE, state.chats.length);
+        const data = await api(chatsUrl(0, limit));
 
         state.chats = data.chats || [];
+        chatsTotal = data.total ?? state.chats.length;
         updateUnreadSummary();
 
         if (state.activeChat) {
@@ -984,7 +1071,8 @@ async function loadChats() {
           if (updated) {
             state.activeChat = updated;
             updateConversationHeader();
-          } else {
+          } else if (!chatsHasFilters() && state.chats.length >= chatsTotal) {
+            // Only a full unfiltered list proves the chat is no longer accessible.
             closeChat();
           }
         }
@@ -1079,7 +1167,7 @@ function renderChats() {
   const chats = filteredChats();
 
   $('chat-count').textContent =
-    `${chats.length} из ${state.chats.length}`;
+    `${chats.length} из ${Math.max(chatsTotal, state.chats.length)}`;
 
   if (!chats.length) {
     $('chat-list').innerHTML =
@@ -2401,9 +2489,17 @@ function connectEvents() {
 $('personal-status-filter').addEventListener('change', event => {
   state.personalStatusFilter = event.target.value;
   renderChats();
+  reloadChatsFromStart();
 });
 
-$('chat-search').addEventListener('input', renderChats);
+let chatSearchTimer = null;
+
+// Instant filter over loaded chats, then a debounced server search.
+$('chat-search').addEventListener('input', () => {
+  renderChats();
+  clearTimeout(chatSearchTimer);
+  chatSearchTimer = setTimeout(reloadChatsFromStart, 300);
+});
 
 document.querySelectorAll('[data-filter]').forEach(button => {
   button.addEventListener('click', () => {
@@ -2414,6 +2510,7 @@ document.querySelectorAll('[data-filter]').forEach(button => {
     });
 
     renderChats();
+    reloadChatsFromStart();
   });
 });
 

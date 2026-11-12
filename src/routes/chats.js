@@ -198,6 +198,14 @@ async function handleChats(req, res, db, url) {
 
     // СПИСОК ЧАТОВ
     if (route === '/api/chats' && req.method === 'GET') {
+      const params = url.searchParams;
+      // No limit = old frontend still open in a tab/PWA: keep the old "up to 1000" response.
+      const limit = Math.min(Math.max(Number.parseInt(params.get('limit'), 10) || 1000, 1), 1000);
+      const offset = Math.max(Number.parseInt(params.get('offset'), 10) || 0, 0);
+      const query = (params.get('q') || '').trim().toLowerCase() || null;
+      const filter = ['free', 'mine'].includes(params.get('filter')) ? params.get('filter') : 'all';
+      const statusId = Number.parseInt(params.get('status_id'), 10) || null;
+
       const result = await db.query(`
         SELECT
           c.id,
@@ -232,7 +240,8 @@ async function handleChats(req, res, db, url) {
           u.display_name AS manager_name,
           m.body AS last_message,
           m.direction AS last_direction,
-          m.message_type AS last_message_type
+          m.message_type AS last_message_type,
+          COUNT(*) OVER()::int AS total_count
         FROM chats c
         LEFT JOIN chat_assignments ca ON ca.chat_id = c.id
         LEFT JOIN users u ON u.id = ca.manager_id
@@ -244,15 +253,40 @@ async function handleChats(req, res, db, url) {
           LIMIT 1
         ) m ON true
         WHERE
-          $1 = 'admin'
-          OR ca.manager_id IS NULL
-          OR ca.manager_id = $2
-        ORDER BY c.last_message_at DESC NULLS LAST
-        LIMIT 1000
-      `, [user.role, user.id]);
+          (
+            $1 = 'admin'
+            OR ca.manager_id IS NULL
+            OR ca.manager_id = $2
+          )
+          AND (
+            $3::text IS NULL
+            OR position($3 IN lower(concat_ws(' ',
+              c.peer_name, c.item_title, m.body, u.display_name
+            ))) > 0
+          )
+          AND (
+            $4 = 'all'
+            OR ($4 = 'free' AND ca.manager_id IS NULL)
+            OR ($4 = 'mine' AND ca.manager_id = $2)
+          )
+          AND (
+            $5::bigint IS NULL
+            OR EXISTS (
+              SELECT 1
+              FROM manager_chat_status_assignments sa
+              WHERE sa.chat_id = c.id
+                AND sa.status_id = $5
+                AND ($1 = 'admin' OR sa.manager_id = $2)
+            )
+          )
+        -- id breaks ties so offset pages don't overlap
+        ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC
+        LIMIT $6 OFFSET $7
+      `, [user.role, user.id, query, filter, statusId, limit, offset]);
 
       return send(res, 200, {
-        chats: result.rows
+        chats: result.rows,
+        total: result.rows[0]?.total_count ?? (offset === 0 ? 0 : null)
       });
     }
 
