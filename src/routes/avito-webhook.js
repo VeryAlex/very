@@ -1,0 +1,208 @@
+
+'use strict';
+
+const crypto = require('node:crypto');
+const { avitoDate } = require('../services/avito-time');
+const { publish } = require('../services/realtime');
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+
+  return left.length === right.length &&
+    crypto.timingSafeEqual(left, right);
+}
+
+async function readJson(req) {
+  let body = '';
+
+  for await (const chunk of req) {
+    body += chunk.toString();
+
+    if (body.length > 1024 * 1024) {
+      throw new Error('Webhook payload too large');
+    }
+  }
+
+  return JSON.parse(body || '{}');
+}
+
+function messageText(value) {
+  const content = value.content || {};
+
+  return content.text ||
+    content.link?.text ||
+    content.location?.text ||
+    '';
+}
+
+async function handleAvitoWebhook(req, res, db, url) {
+  const secret = process.env.AVITO_WEBHOOK_SECRET;
+
+  if (!secret) {
+    res.writeHead(503);
+    res.end();
+    return true;
+  }
+
+  const expectedPath =
+    `/api/avito/webhook/${encodeURIComponent(secret)}`;
+
+  if (url.pathname !== expectedPath || req.method !== 'POST') {
+    return false;
+  }
+
+  try {
+    const event = await readJson(req);
+    const value = event.payload?.value;
+
+    if (!value?.id || !value?.chat_id || !value?.author_id) {
+      res.writeHead(400);
+      res.end();
+      return true;
+    }
+
+    const accountId = String(value.user_id || '');
+    const authorId = String(value.author_id);
+
+    const direction = accountId && authorId === accountId
+      ? 'out'
+      : 'in';
+
+    const created = avitoDate(value.created) || new Date();
+
+    const client = await db.connect();
+
+    let inserted = false;
+    let localChatId;
+
+    try {
+      await client.query('BEGIN');
+
+      const chatResult = await client.query(`
+        INSERT INTO chats (
+          avito_chat_id,
+          last_message_id,
+          last_message_at,
+          last_synced_at,
+          raw,
+          updated_at
+        )
+        VALUES ($1,$2,$3,now(),$4,now())
+        ON CONFLICT (avito_chat_id)
+        DO UPDATE SET
+          last_message_id = EXCLUDED.last_message_id,
+          last_message_at = GREATEST(
+            COALESCE(chats.last_message_at, EXCLUDED.last_message_at),
+            EXCLUDED.last_message_at
+          ),
+          last_synced_at = now(),
+          raw = EXCLUDED.raw,
+          updated_at = now()
+        RETURNING id
+      `, [
+        String(value.chat_id),
+        String(value.id),
+        created,
+        event
+      ]);
+
+      localChatId = chatResult.rows[0].id;
+
+      const messageResult = await client.query(`
+        INSERT INTO messages (
+          chat_id,
+          avito_message_id,
+          direction,
+          body,
+          message_type,
+          author_id,
+          created_at,
+          raw
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (chat_id, avito_message_id)
+        DO NOTHING
+        RETURNING id
+      `, [
+        localChatId,
+        String(value.id),
+        direction,
+        messageText(value),
+        value.type || 'text',
+        authorId,
+        created,
+        value
+      ]);
+
+      inserted = messageResult.rowCount > 0;
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    // Avito получает подтверждение после сохранения сообщения.
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store'
+    });
+    res.end(JSON.stringify({ ok: true }));
+
+    if (!inserted) return true;
+
+    // Определяем, кому назначен чат.
+    const assignment = await db.query(`
+      SELECT manager_id
+      FROM chat_assignments
+      WHERE chat_id = $1
+    `, [localChatId]);
+
+    const managerId = assignment.rows[0]?.manager_id;
+
+    const notification = {
+      chat_id: String(value.chat_id),
+      local_chat_id: String(localChatId),
+      message_id: String(value.id),
+      direction,
+      author_id: authorId,
+      body: messageText(value),
+      type: value.type || 'text',
+      created_at: created.toISOString()
+    };
+
+    // Администратор видит всё.
+    // Менеджер видит свои чаты и свободные чаты.
+    publish('message', notification, user => {
+      if (user.role === 'admin') return true;
+
+      if (user.role !== 'manager') return false;
+
+      if (managerId === null || managerId === undefined) {
+        return true;
+      }
+
+      return String(user.id) === String(managerId);
+    });
+
+
+    console.log(
+      `AVITO WEBHOOK: chat=${value.chat_id}, inserted=${inserted}`
+    );
+
+  } catch (error) {
+    console.error('AVITO WEBHOOK ERROR:', error.message);
+
+    if (!res.headersSent) {
+      res.writeHead(500);
+      res.end();
+    }
+  }
+
+  return true;
+}
+
+module.exports = { handleAvitoWebhook };

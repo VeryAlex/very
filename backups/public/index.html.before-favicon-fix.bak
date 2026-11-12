@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="icon" type="image/png" href="/favicon.png?v=1">
+  <link rel="apple-touch-icon" href="/logo.png?v=1">
+  <title>Very Delivery CRM</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main id="app">
+
+  <section id="login-screen" class="login-card">
+    <div class="brand">
+      <img class="brand-logo" src="/logo.png" alt="Very Delivery">
+      <span>VERY DELIVERY</span>
+    </div>
+    <h1>Вход в CRM</h1>
+    <p class="subtitle">Система управления переписками</p>
+    <form id="login-form">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email"
+        autocomplete="username" placeholder="Введите email" required>
+      <label for="password">Пароль</label>
+      <input id="password" name="password" type="password"
+        autocomplete="current-password" placeholder="Введите пароль" required>
+      <button type="submit">Войти</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <section id="dashboard" hidden>
+
+    <header class="topbar">
+      <div class="brand">
+        <img class="brand-logo" src="/logo.png" alt="Very Delivery">
+        <span>VERY DELIVERY CRM</span>
+      </div>
+      <div class="topbar-right">
+        <span id="user-info"></span>
+        <span id="connection-status" class="connection">Подключение...</span>
+        <button id="logout" class="secondary" type="button">Выйти</button>
+      </div>
+    </header>
+
+    <details id="admin-panel" class="admin-panel" hidden>
+      <summary>Управление менеджерами</summary>
+
+      <form id="manager-form" class="manager-form">
+        <input id="manager-name" placeholder="Имя менеджера" required>
+        <input id="manager-email" type="email"
+          placeholder="Email менеджера" required>
+        <input id="manager-password" type="password"
+          minlength="12" placeholder="Временный пароль" required>
+        <button type="submit">Создать менеджера</button>
+      </form>
+
+      <p id="manager-error" class="error"></p>
+      <p id="manager-success" class="success"></p>
+      <div id="manager-list"></div>
+    </details>
+
+    <main class="messenger">
+
+      <aside class="sidebar">
+
+        <div class="sidebar-heading">
+          <div>
+            <h1>Сообщения</h1>
+            <span id="chat-count">Загрузка...</span>
+          </div>
+          <button id="refresh-chats" class="icon-button"
+            type="button" title="Обновить">↻</button>
+        </div>
+
+        <input id="chat-search" class="search" type="search"
+          placeholder="Поиск по клиентам и товарам...">
+
+        <div class="filters">
+          <button class="filter active" data-filter="all" type="button">Все</button>
+          <button class="filter" data-filter="free" type="button">Свободные</button>
+          <button class="filter" data-filter="mine" type="button">Мои</button>
+        </div>
+
+        <div id="chat-list" class="chat-list">
+          <div class="empty">Загрузка чатов...</div>
+        </div>
+
+      </aside>
+
+      <section class="conversation">
+
+        <div id="chat-placeholder" class="chat-placeholder">
+          <div>
+            <div class="placeholder-icon">VD</div>
+            <h2>Very Delivery CRM</h2>
+            <p>Выберите переписку, чтобы начать работу</p>
+          </div>
+        </div>
+
+        <div id="conversation-view" class="conversation-view" hidden>
+
+          <header class="conversation-header">
+            <button id="back-to-list" class="back-button" type="button">
+              ←
+            </button>
+
+            <div id="conversation-avatar" class="conversation-avatar">К</div>
+
+            <div class="conversation-person">
+              <strong id="active-name">Клиент</strong>
+              <a id="active-item" href="#" target="_blank"
+                 rel="noopener noreferrer">Объявление</a>
+              <span id="active-price" class="active-price" hidden></span>
+            </div>
+
+            <div id="assignment-control"></div>
+          </header>
+
+<!-- NOTES PANEL VD -->
+          <section id="notes-panel" class="notes-panel">
+            <div class="notes-heading">
+              <div>
+                <strong>Внутренние заметки</strong>
+                <span>Видны только сотрудникам CRM</span>
+              </div>
+              <span class="notes-count" id="notes-count">0</span>
+            </div>
+
+            <div id="notes-list" class="notes-list">
+              <div class="notes-empty">Загрузка заметок...</div>
+            </div>
+
+            <form id="notes-form" class="notes-form">
+              <textarea id="notes-input" rows="2"
+                maxlength="5000"
+                placeholder="Добавить заметку для команды..."
+                required></textarea>
+              <button id="notes-submit" type="submit">Добавить</button>
+            </form>
+            <p id="notes-error" class="notes-error"></p>
+          </section>
+          <!-- END NOTES PANEL VD -->
+
+          <div id="message-list" class="message-list">
+            <div class="empty">Загрузка сообщений...</div>
+          </div>
+
+
+          
+
+          <p id="message-error" class="error message-error"></p>
+
+          <div id="reply-preview" class="reply-preview" hidden>
+            <div class="reply-preview-content">
+              <span class="reply-preview-label">Ответ на сообщение</span>
+              <div id="reply-preview-text" class="reply-preview-text"></div>
+            </div>
+            <button id="reply-preview-cancel"
+              type="button" aria-label="Отменить ответ">×</button>
+          </div>
+
+          <form id="message-form" class="message-form">
+
+            <div class="composer-tools">
+              <button type="button" id="composer-plus"
+                class="composer-plus" aria-label="Вложения и быстрые ответы">+</button>
+
+              <div id="composer-menu" class="composer-menu" hidden>
+                <button type="button" id="choose-media">Фото и видео</button>
+                <button type="button" id="open-quick-replies">Быстрые ответы</button>
+              </div>
+
+              <input type="file" id="media-input"
+                accept="image/*,video/*" multiple hidden>
+            </div>
+
+            <div id="quick-replies-panel" class="quick-replies-panel" hidden>
+              <div class="quick-replies-heading">
+                <strong>Быстрые ответы</strong>
+                <button type="button" id="quick-reply-create">+ Создать</button>
+              </div>
+              <input id="quick-reply-search" type="search"
+                placeholder="Поиск шаблона...">
+              <div id="quick-replies-list"></div>
+            </div>
+
+            <textarea id="message-input" rows="1"
+              placeholder="Напишите сообщение..." required></textarea>
+            <button id="send-button" type="submit">Отправить</button>
+          </form>
+
+          <dialog id="quick-reply-dialog" class="quick-reply-dialog">
+            <form id="quick-reply-editor-form">
+              <h3 id="quick-reply-dialog-title">Новый быстрый ответ</h3>
+              <input type="hidden" id="quick-reply-id">
+              <label for="quick-reply-title">Название</label>
+              <input id="quick-reply-title" maxlength="100"
+                required placeholder="Например: Сроки доставки">
+              <label for="quick-reply-body">Текст ответа</label>
+              <textarea id="quick-reply-body" maxlength="2000"
+                required rows="6" placeholder="Введите текст шаблона..."></textarea>
+              <div class="quick-reply-dialog-actions">
+                <button type="button" id="quick-reply-cancel">Отмена</button>
+                <button type="submit">Сохранить</button>
+              </div>
+              <p id="quick-reply-error"></p>
+            </form>
+          </dialog>
+
+        </div>
+      </section>
+    </main>
+  </section>
+</main>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

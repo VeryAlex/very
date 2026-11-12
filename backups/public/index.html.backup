@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>Very Delivery CRM</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main id="app">
+  <section id="login-screen" class="login-card">
+    <div class="brand"><div class="brand-mark">VD</div><span>VERY DELIVERY</span></div>
+    <h1>Вход в CRM</h1>
+    <p class="subtitle">Система управления переписками</p>
+    <form id="login-form">
+      <label for="email">Email</label>
+      <input id="email" type="email" autocomplete="username" required>
+      <label for="password">Пароль</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Войти</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <section id="dashboard" hidden>
+    <header class="topbar">
+      <div class="brand"><div class="brand-mark">VD</div><span>VERY DELIVERY CRM</span></div>
+      <div class="topbar-right">
+        <span id="user-info"></span>
+        <span id="connection-status" class="connection">Подключение...</span>
+        <button id="logout" class="secondary">Выйти</button>
+      </div>
+    </header>
+
+    <section id="admin-panel" class="admin-panel" hidden>
+      <details>
+        <summary>Управление менеджерами</summary>
+        <form id="manager-form" class="manager-form">
+          <input id="manager-name" placeholder="Имя менеджера" required>
+          <input id="manager-email" type="email" placeholder="Email" required>
+          <input id="manager-password" type="password" minlength="12" placeholder="Пароль от 12 символов" required>
+          <button type="submit">Создать менеджера</button>
+        </form>
+        <p id="manager-error" class="error"></p>
+        <p id="manager-success" class="success"></p>
+        <div id="manager-list"></div>
+      </details>
+    </section>
+
+    <section class="messenger">
+      <aside class="sidebar">
+        <div class="sidebar-heading">
+          <div>
+            <h1>Сообщения</h1>
+            <span id="chat-count">Загрузка...</span>
+          </div>
+          <button id="refresh-chats" class="icon-button" title="Обновить">↻</button>
+        </div>
+
+        <input id="chat-search" class="search" placeholder="Поиск по клиентам и товарам...">
+
+        <nav class="filters">
+          <button class="filter active" data-filter="all">Все</button>
+          <button class="filter" data-filter="free">Свободные</button>
+          <button class="filter" data-filter="mine">Мои</button>
+        </nav>
+
+        <div id="chat-list" class="chat-list">
+          <div class="empty">Загрузка чатов...</div>
+        </div>
+      </aside>
+
+      <section class="conversation">
+        <div id="chat-placeholder" class="chat-placeholder">
+          <div class="placeholder-icon">VD</div>
+          <h2>Very Delivery CRM</h2>
+          <p>Выберите переписку, чтобы начать работу</p>
+        </div>
+
+        <div id="conversation-view" class="conversation-view" hidden>
+          <header class="conversation-header">
+            <button id="back-to-list" class="back-button">←</button>
+            <div class="conversation-person">
+              <strong id="active-name">Клиент</strong>
+              <span id="active-item"></span>
+            </div>
+            <div id="assignment-control"></div>
+          </header>
+
+          <div id="message-list" class="message-list"></div>
+
+          <form id="message-form" class="message-form">
+            <textarea id="message-input" rows="1" maxlength="1000"
+              placeholder="Напишите сообщение..." required></textarea>
+            <button id="send-button" type="submit">Отправить</button>
+          </form>
+          <p id="message-error" class="error message-error"></p>
+        </div>
+      </section>
+    </section>
+  </section>
+</main>
+<script src="/app.js" defer></script>
+</body>
+</html>

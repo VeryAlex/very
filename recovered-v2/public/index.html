@@ -1,0 +1,118 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>Very Delivery CRM</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<main id="app">
+
+  <section id="login-screen" class="login-card">
+    <div class="brand">
+      <div class="brand-mark">VD</div>
+      <span>VERY DELIVERY</span>
+    </div>
+
+    <h1>Вход в CRM</h1>
+    <p class="subtitle">Система управления переписками</p>
+
+    <form id="login-form">
+      <label for="email">Email</label>
+      <input
+        id="email"
+        name="email"
+        type="email"
+        autocomplete="username"
+        placeholder="Введите email"
+        required
+      >
+
+      <label for="password">Пароль</label>
+      <input
+        id="password"
+        name="password"
+        type="password"
+        autocomplete="current-password"
+        placeholder="Введите пароль"
+        required
+      >
+
+      <button type="submit">Войти</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <section id="dashboard" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">VD</div>
+        <span>VERY DELIVERY CRM</span>
+      </div>
+
+      <button id="logout" class="secondary" type="button">
+        Выйти
+      </button>
+    </header>
+
+    <div class="dashboard-content">
+      <h1>Добро пожаловать!</h1>
+      <p id="user-info"></p>
+
+      <section id="admin-panel" hidden>
+        <h2>Управление менеджерами</h2>
+        <p class="subtitle">Создание и управление аккаунтами сотрудников</p>
+
+        <form id="manager-form">
+          <label for="manager-name">Имя менеджера</label>
+          <input
+            id="manager-name"
+            type="text"
+            placeholder="Имя и фамилия"
+            required
+          >
+
+          <label for="manager-email">Email менеджера</label>
+          <input
+            id="manager-email"
+            type="email"
+            placeholder="manager@example.com"
+            required
+          >
+
+          <label for="manager-password">Временный пароль</label>
+          <input
+            id="manager-password"
+            type="password"
+            minlength="12"
+            autocomplete="new-password"
+            placeholder="Минимум 12 символов"
+            required
+          >
+
+          <button type="submit">Создать менеджера</button>
+          <p id="manager-error" class="error" role="alert"></p>
+          <p id="manager-success" class="error" role="status"></p>
+        </form>
+
+        <div id="manager-list"></div>
+      </section>
+
+      <section id="manager-dashboard" hidden>
+        <h2>Переписки</h2>
+        <p class="subtitle">
+          Модуль чатов будет подключён следующим этапом разработки.
+        </p>
+      </section>
+    </div>
+  </section>
+
+</main>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const { Pool } = require('pg');
+const { handleAuth } = require('./auth');
+const { handleChats } = require('./routes/chats');
+const { handleQuickReplies } = require('./routes/quick-replies');
+const { handleAvitoWebhook } = require('./routes/avito-webhook');
+const { handleEvents } = require('./routes/events');
+
+const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 5000,
+  idleTimeoutMillis: 30000,
+  max: 15
+});
+
+const PUBLIC_DIR = path.resolve(__dirname, '../public');
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon'
+};
+
+function send(res, status, data) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store'
+  });
+
+  res.end(JSON.stringify(data));
+}
+
+async function serveStatic(req, res, pathname) {
+  let requested;
+
+  try {
+    requested = decodeURIComponent(pathname);
+  } catch {
+    return send(res, 400, { error: 'Некорректный адрес' });
+  }
+
+  if (requested === '/') requested = '/index.html';
+
+  const file = path.resolve(PUBLIC_DIR, '.' + requested);
+
+  if (!file.startsWith(PUBLIC_DIR + path.sep)) {
+    return send(res, 403, { error: 'Доступ запрещён' });
+  }
+
+  try {
+    const content = await fs.promises.readFile(file);
+
+    res.writeHead(200, {
+      'Content-Type':
+        MIME[path.extname(file)] || 'application/octet-stream',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-cache'
+    });
+
+    if (req.method === 'HEAD') return res.end();
+
+    res.end(content);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return send(res, 404, { error: 'Файл не найден' });
+    }
+
+    console.error('STATIC ERROR:', error);
+    send(res, 500, { error: 'Ошибка сервера' });
+  }
+}
+
+const server = http.createServer(async (req, res) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+
+  let url;
+
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch {
+    return send(res, 400, { error: 'Некорректный запрос' });
+  }
+
+  if (url.pathname === '/health') {
+    try {
+      const result = await db.query(
+        'SELECT current_database() AS database'
+      );
+
+      return send(res, 200, {
+        status: 'ok',
+        database: result.rows[0].database
+      });
+    } catch (error) {
+      console.error('DATABASE ERROR:', error.message);
+
+      return send(res, 503, {
+        status: 'error'
+      });
+    }
+  }
+
+  if (url.pathname.startsWith('/api/')) {
+    try {
+      const webhookHandled = await handleAvitoWebhook(
+        req, res, db, url
+      );
+
+      if (webhookHandled !== false) return;
+
+      const eventsHandled = await handleEvents(
+        req, res, db, url
+      );
+
+      if (eventsHandled !== false) return;
+
+      const quickRepliesHandled = await handleQuickReplies(
+        req, res, db, url
+      );
+
+      if (quickRepliesHandled !== false) return;
+
+      const chatsHandled = await handleChats(req, res, db, url);
+
+      if (chatsHandled !== false) return;
+
+      const handled = await handleAuth(req, res, db, url);
+
+      if (handled !== false) return;
+
+      return send(res, 404, {
+        error: 'API не найден'
+      });
+    } catch (error) {
+      console.error('API ERROR:', error);
+
+      return send(res, 500, {
+        error: 'Внутренняя ошибка сервера'
+      });
+    }
+  }
+
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    return serveStatic(req, res, url.pathname);
+  }
+
+  return send(res, 405, {
+    error: 'Метод не поддерживается'
+  });
+});
+
+const PORT = Number(process.env.PORT || 3100);
+const HOST = process.env.HOST || '127.0.0.1';
+
+server.listen(PORT, HOST, () => {
+  console.log(`Very Delivery CRM started on ${HOST}:${PORT}`);
+});
+
+server.on('error', error => {
+  console.error('SERVER ERROR:', error);
+  process.exit(1);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('Stopping CRM...');
+
+  server.close();
+  await db.end();
+
+  process.exit(0);
+});

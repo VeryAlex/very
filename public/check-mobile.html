@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Диагностика CRM</title>
+</head>
+<body style="font:16px Arial;padding:20px">
+<h2>Диагностика мобильной CRM</h2>
+<div id="result">Загрузка...</div>
+<button onclick="check()">Обновить проверку</button>
+<script>
+async function check() {
+  const el = document.getElementById('result');
+  el.innerHTML = 'Получаем свежие данные...';
+  try {
+    const r = await fetch('/api/chats?_diag=' + Date.now(), {
+      credentials: 'same-origin',
+      cache: 'no-store'
+    });
+    const d = await r.json();
+    const chats = d.chats || [];
+    const m = chats.find(c => String(c.id) === '20');
+
+    el.innerHTML = `
+      <p>Время проверки: ${new Date().toLocaleTimeString()}</p>
+      <p>HTTP: ${r.status}</p>
+      <p>Всего чатов: ${chats.length}</p>
+      <h3>Москва</h3>
+      <p>ID: ${m?.id ?? 'не найдена'}</p>
+      <h2>Непрочитанные: ${m?.unread_count ?? '—'}</h2>
+      <h3>Первые 10 чатов с сервера</h3>
+      ${chats.slice(0,10).map((c,i) =>
+        `<p>${i+1}. ${c.peer_name} — ID ${c.id} — непрочитанных ${c.unread_count}</p>`
+      ).join('')}
+    `;
+  } catch(e) {
+    el.textContent = 'Ошибка: ' + e.message;
+  }
+}
+check();
+</script>
+</body>
+</html>

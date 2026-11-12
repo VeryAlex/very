@@ -1,0 +1,75 @@
+'use strict';
+
+self.addEventListener('install', event => {
+  event.waitUntil(self.skipWaiting());
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('push', event => {
+  let data = {};
+
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = {
+      title: 'Very Delivery CRM',
+      body: event.data ? event.data.text() : 'Новое уведомление'
+    };
+  }
+
+  const title = data.title || 'Very Delivery CRM';
+
+  const options = {
+    body: data.body || 'Новое сообщение',
+    icon: '/logo.png',
+    badge: '/favicon.png',
+    tag: data.tag || undefined,
+    renotify: Boolean(data.renotify),
+    data: {
+      url: data.url || '/',
+      chat_id: data.chat_id || null
+    }
+  };
+
+  event.waitUntil(
+    self.registration.showNotification(title, options)
+  );
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+
+  const target = new URL(
+    event.notification.data?.url || '/',
+    self.location.origin
+  );
+
+  if (target.origin !== self.location.origin) {
+    target.pathname = '/';
+    target.search = '';
+    target.hash = '';
+  }
+
+  event.waitUntil(
+    self.clients.matchAll({
+      type: 'window',
+      includeUncontrolled: true
+    }).then(clientList => {
+      for (const client of clientList) {
+        if (client.url.startsWith(self.location.origin) &&
+            'focus' in client) {
+          return client.focus().then(() => {
+            if (client.navigate) {
+              return client.navigate(target.href);
+            }
+          });
+        }
+      }
+
+      return self.clients.openWindow(target.href);
+    })
+  );
+});

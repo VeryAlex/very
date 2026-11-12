@@ -1,0 +1,1 @@
+'use strict';const app = require('fastify')({  logger: true});app.get('/health', async () => {  return {    status: 'ok',    service: 'Very Delivery CRM',    database: 'not_connected'  };});app.listen({  port: 3000,  host: '0.0.0.0'}).catch(err => {  app.log.error(err);  process.exit(1);});

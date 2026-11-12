@@ -1,0 +1,1387 @@
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  user: null,
+  chats: [],
+  activeChat: null,
+  messages: [],
+  filter: 'all',
+  loading: false,
+  sending: false,
+  messagesRefreshing: false,
+  messagesRequestId: 0,
+  adminManagers: [],
+  adminSummaryLoading: false,
+  adminAssigning: false,
+  quickReplies: [],
+  noteLoading: false
+};
+
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    ...options,
+    headers: {
+      ...(options.body ? {
+        'Content-Type': 'application/json'
+      } : {}),
+      ...options.headers
+    }
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(
+      data.error || `Ошибка API: ${response.status}`
+    );
+
+    error.status = response.status;
+    error.data = data;
+
+    throw error;
+  }
+
+  return data;
+}
+
+// Авторизация
+
+async function login(email, password) {
+  return api('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  });
+}
+
+async function logout() {
+  try {
+    await api('/api/auth/logout', {
+      method: 'POST'
+    });
+  } finally {
+    state.user = null;
+    state.activeChat = null;
+    state.chats = [];
+    state.messages = [];
+    state.messagesRequestId++;
+    state.messagesRefreshing = false;
+
+    showLogin();
+  }
+}
+
+async function checkSession() {
+  try {
+    const data = await api('/api/auth/me');
+
+    state.user = data.user;
+
+    await showCRM();
+  } catch (error) {
+    showLogin();
+  }
+}
+
+function showLogin() {
+  $('login-screen').classList.remove('hidden');
+  $('crm-screen').classList.add('hidden');
+}
+
+async function showCRM() {
+  $('login-screen').classList.add('hidden');
+  $('crm-screen').classList.remove('hidden');
+
+  $('current-user').textContent =
+    `${state.user.display_name} · ${
+      state.user.role === 'admin' ? 'Администратор' : 'Менеджер'
+    }`;
+
+  const dashboard = $('admin-dashboard');
+  if (dashboard) {
+    dashboard.classList.toggle('hidden', state.user.role !== 'admin');
+  }
+
+  await loadChats();
+
+  if (state.user.role === 'admin') {
+    await loadAdminSummary();
+  }
+
+  await loadQuickReplies();
+}
+
+// Чаты
+
+async function loadChats() {
+  if (state.loading) return;
+
+  state.loading = true;
+
+  try {
+    const data = await api('/api/chats');
+
+    state.chats = data.chats || [];
+
+    renderChats();
+
+    if (state.activeChat) {
+      const updated = state.chats.find(
+        chat => chat.chat_id === state.activeChat.chat_id
+      );
+
+      if (updated) {
+        state.activeChat = updated;
+        updateChatDetails();
+      } else {
+        closeActiveChat();
+      }
+    }
+
+    if (state.user?.role === 'admin') {
+      loadAdminSummary();
+    }
+  } catch (error) {
+    console.error('CHAT_LOAD_ERROR:', error);
+
+    if (error.status === 401) {
+      showLogin();
+    }
+  } finally {
+    state.loading = false;
+  }
+}
+
+function renderChats() {
+  const searchInput = $('chat-search');
+  const search = searchInput
+    ? searchInput.value.trim().toLowerCase()
+    : '';
+
+  const chats = state.chats.filter(chat => {
+    const searchable = [
+      chat.peer_name,
+      chat.item_title,
+      chat.item_url,
+      chat.order_id,
+      chat.last_message_text,
+      chat.last_message_preview
+    ].join(' ').toLowerCase();
+
+    if (search && !searchable.includes(search)) return false;
+
+    if (state.filter === 'free') {
+      return !chat.manager_email;
+    }
+
+    if (state.filter === 'mine') {
+      return chat.manager_email === state.user?.email;
+    }
+
+    return true;
+  });
+
+  const count = $('chat-count');
+
+  if (count) {
+    count.textContent =
+      `Показано ${chats.length} из ${state.chats.length}`;
+  }
+
+  const list = $('chat-list');
+
+  if (!list) return;
+
+  if (!chats.length) {
+    list.innerHTML =
+      '<div class="loading">Чаты не найдены</div>';
+    return;
+  }
+
+  list.innerHTML = chats.map(chat => {
+    const active =
+      state.activeChat?.chat_id === chat.chat_id;
+
+    // Имя и объявление из сохранённого ответа Avito
+    const raw = chat.raw || {};
+
+    // Находим клиента среди участников Avito,
+    // исключая собственный аккаунт Very Delivery.
+    const peer = (raw.users || []).find(
+      user => String(user.id) !== '386937572'
+    ) || {};
+
+    const peerName =
+      chat.peer_name ||
+      peer.name ||
+      'Клиент';
+
+    const itemTitle =
+      chat.item_title ||
+      raw.context?.value?.title ||
+      'Объявление';
+
+    const managerRecord = state.adminManagers.find(
+      item => item.email === chat.manager_email
+    );
+
+    const manager = chat.manager_email
+      ? (managerRecord?.display_name || chat.manager_email)
+      : 'Свободный чат';
+
+    let imageUrl = '';
+
+    if (chat.item_image_url) {
+      try {
+        const parsed = new URL(chat.item_image_url);
+
+        if (
+          parsed.protocol === 'https:' &&
+          /^\d+\.img\.avito\.st$/.test(parsed.hostname)
+        ) {
+          imageUrl = parsed.href;
+        }
+      } catch (_) {
+        imageUrl = '';
+      }
+    }
+
+    const imageMarkup = imageUrl
+      ? `<img class="chat-product-image"
+          src="${escapeHTML(imageUrl)}"
+          alt=""
+          loading="lazy"
+          referrerpolicy="no-referrer">`
+      : '<div class="chat-product-placeholder">VD</div>';
+
+    const lastMessage = String(
+      chat.last_message_text ??
+      chat.last_message_preview ??
+      chat.last_message?.text_content ??
+      ''
+    ).trim();
+
+    const lastDirection = String(
+      chat.last_message_direction ??
+      chat.last_message?.direction ??
+      ''
+    ).toLowerCase();
+
+    const preview = lastMessage
+      ? `${lastDirection === 'out' ? 'Вы: ' : ''}${lastMessage}`
+      : 'Сообщений пока нет';
+
+    const statusLabel = chat.manager_email
+      ? 'Закреплён'
+      : 'Свободен';
+
+    const canQuickAssign =
+      state.user?.role === 'admin' && !chat.manager_email;
+
+    return `
+      <div class="chat-item ${active ? 'active' : ''}"
+           data-chat-id="${escapeHTML(chat.chat_id)}">
+
+        <div class="chat-product-preview">
+          ${imageMarkup}
+        </div>
+
+        <div class="chat-item-content">
+
+          <div class="chat-item-heading">
+            <strong>
+              ${escapeHTML(peerName)}
+            </strong>
+
+            <span class="chat-status-pill ${
+              chat.manager_email ? 'assigned' : 'free'
+            }">
+              ${statusLabel}
+            </span>
+          </div>
+
+          <p class="chat-product-title">
+            ${escapeHTML(itemTitle)}
+          </p>
+
+          <p class="chat-last-message"
+             title="${escapeHTML(preview)}">
+            ${escapeHTML(preview)}
+          </p>
+
+          <div class="chat-item-bottom">
+
+            <span class="chat-manager ${
+              chat.manager_email ? 'assigned' : 'free'
+            }">
+              ${escapeHTML(manager)}
+            </span>
+
+            ${canQuickAssign ? `
+              <span class="chat-quick-assign">
+
+                <button type="button"
+                        class="chat-assign-button"
+                        data-manager-email="very.ivan@proton.me">
+                  Ивану
+                </button>
+
+                <button type="button"
+                        class="chat-assign-button"
+                        data-manager-email="very.kirill@proton.me">
+                  Кириллу
+                </button>
+
+              </span>
+            ` : ''}
+
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  list.querySelectorAll('.chat-item').forEach(item => {
+    item.addEventListener('click', () => {
+      openChat(item.dataset.chatId);
+    });
+  });
+
+  list.querySelectorAll('.chat-assign-button').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const card = button.closest('.chat-item');
+
+      if (!card) return;
+
+      assignChatFromCard(
+        card.dataset.chatId,
+        button.dataset.managerEmail,
+        button
+      );
+    });
+  });
+}
+
+async function assignChatFromCard(
+  chatId,
+  managerEmail,
+  button
+) {
+  if (
+    !chatId ||
+    ![
+      'very.ivan@proton.me',
+      'very.kirill@proton.me'
+    ].includes(managerEmail) ||
+    state.user?.role !== 'admin' ||
+    button?.disabled
+  ) {
+    return;
+  }
+
+  const card = button.closest('.chat-item');
+
+  const buttons = card
+    ? Array.from(card.querySelectorAll('.chat-assign-button'))
+    : [];
+
+  buttons.forEach(item => {
+    item.disabled = true;
+  });
+
+  try {
+    await api(
+      `/api/chats/${encodeURIComponent(chatId)}/assign`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          manager_email: managerEmail
+        })
+      }
+    );
+
+    const updatedChat = state.chats.find(
+      item => item.chat_id === chatId
+    );
+
+    if (updatedChat) {
+      updatedChat.manager_email = managerEmail;
+    }
+
+    renderChats();
+
+    await loadChats();
+
+    if (state.user?.role === 'admin') {
+      await loadAdminSummary();
+    }
+  } catch (error) {
+    console.error('CHAT_QUICK_ASSIGN_ERROR:', error);
+
+    alert(`Не удалось назначить чат: ${error.message}`);
+
+    buttons.forEach(item => {
+      item.disabled = false;
+    });
+  }
+}
+
+// Открытие переписки
+
+async function openChat(chatId) {
+  const chat = state.chats.find(
+    item => item.chat_id === chatId
+  );
+
+  if (!chat) return;
+
+  state.activeChat = chat;
+  state.messages = [];
+
+  const requestId = ++state.messagesRequestId;
+
+  state.messagesRefreshing = true;
+
+  $('empty-chat').classList.add('hidden');
+  $('active-chat').classList.remove('hidden');
+
+  renderChats();
+  updateChatDetails();
+  loadChatNote(chatId);
+
+  $('messages-list').innerHTML =
+    '<div class="loading">Загрузка сообщений...</div>';
+
+  if (window.innerWidth <= 650) {
+    document.querySelector('.workspace')
+      .classList.add('chat-open');
+  }
+
+  try {
+    const data = await api(
+      `/api/chats/${encodeURIComponent(chatId)}/messages?limit=100`
+    );
+
+    if (
+      state.activeChat?.chat_id !== chatId ||
+      state.messagesRequestId !== requestId
+    ) {
+      return;
+    }
+
+    state.messages = data.messages || [];
+
+    // При открытии чата прокручиваем переписку вниз.
+    renderMessages(true);
+
+  } catch (error) {
+    if (state.activeChat?.chat_id === chatId) {
+      $('messages-list').innerHTML =
+        `<div class="loading">${escapeHTML(error.message)}</div>`;
+    }
+  } finally {
+    if (state.messagesRequestId === requestId) {
+      state.messagesRefreshing = false;
+    }
+  }
+}
+
+function closeActiveChat() {
+  state.messagesRequestId++;
+  state.messagesRefreshing = false;
+
+  state.activeChat = null;
+  state.messages = [];
+
+  $('active-chat').classList.add('hidden');
+  $('empty-chat').classList.remove('hidden');
+
+  document.querySelector('.workspace')
+    .classList.remove('chat-open');
+
+  renderChats();
+}
+
+function updateChatDetails() {
+  const chat = state.activeChat;
+
+  if (!chat) return;
+
+  $('peer-name').textContent =
+    chat.peer_name || 'Клиент';
+
+  $('item-title').textContent =
+    chat.item_title || 'Без объявления';
+
+  const itemLink = $('item-link');
+
+  if (chat.item_url) {
+    itemLink.href = chat.item_url;
+    itemLink.classList.remove('hidden');
+  } else {
+    itemLink.removeAttribute('href');
+    itemLink.classList.add('hidden');
+  }
+
+  const managerRecord = state.adminManagers.find(
+    item => item.email === chat.manager_email
+  );
+
+  const manager = chat.manager_email
+    ? (managerRecord?.display_name || chat.manager_email)
+    : 'Свободный чат';
+
+  $('detail-peer').textContent =
+    chat.peer_name || '—';
+
+  $('detail-manager').textContent = manager;
+
+  $('detail-status').textContent =
+    chat.manager_email ? 'Закреплён' : 'Свободен';
+
+  $('detail-order').textContent =
+    chat.order_id || '—';
+
+  const claimButton = $('claim-chat');
+
+  if (claimButton) {
+    const canClaim =
+      state.user?.role === 'manager' &&
+      !chat.manager_email;
+
+    claimButton.classList.toggle('hidden', !canClaim);
+  }
+
+  const adminControls = $('admin-chat-controls');
+
+  if (adminControls) {
+    adminControls.classList.toggle(
+      'hidden',
+      state.user?.role !== 'admin'
+    );
+  }
+
+  const managerSelect = $('admin-manager-select');
+
+  if (managerSelect) {
+    managerSelect.value = chat.manager_email || '';
+  }
+
+  const statusBadge = $('chat-status');
+
+  if (statusBadge) {
+    statusBadge.textContent =
+      chat.manager_email ? 'Закреплён' : 'Свободен';
+
+    statusBadge.className =
+      `status-badge ${
+        chat.manager_email ? 'assigned' : 'free'
+      }`;
+  }
+
+  const managerCanSend = state.user?.role === 'admin' || chat.manager_email === state.user?.email;
+  const sendButton = $('send-button');
+  const messageInput = $('message-input');
+  const imageInput = $('image-input');
+  const imageLabel = document.querySelector('label[for="image-input"]');
+
+  if (sendButton) sendButton.disabled = !managerCanSend;
+
+  if (messageInput) {
+    messageInput.disabled = !managerCanSend;
+    messageInput.placeholder = managerCanSend ? 'Введите сообщение...' : 'Сначала заберите свободный чат';
+  }
+
+  if (imageInput) imageInput.disabled = !managerCanSend;
+  if (imageLabel) imageLabel.classList.toggle('disabled', !managerCanSend);
+}
+
+// Отображение сообщений
+
+function rawMediaInfo(raw) {
+  const urls = [];
+  const voiceIds = [];
+  const seen = new Set();
+
+  function walk(value, key = '') {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      value.forEach(v => walk(v, key));
+      return;
+    }
+
+    for (const [k, v] of Object.entries(value)) {
+      if (typeof v === 'string') {
+        if (/^(url|uri|image_url|download_url)$/i.test(k) && /^https:\/\//i.test(v) && !seen.has(v)) {
+          seen.add(v);
+          urls.push(v);
+        }
+
+        if (/voice.?id/i.test(k) && v.trim()) {
+          voiceIds.push(v.trim());
+        }
+      } else if (v && typeof v === 'object') {
+        walk(v, k);
+      }
+    }
+  }
+
+  walk(raw || {});
+  return { urls, voiceIds: [...new Set(voiceIds)] };
+}
+
+function renderMessages(scrollToBottom = false, appendFromIndex = null) {
+  const list = $('messages-list');
+  if (!list) return;
+
+  const previousScrollTop = list.scrollTop;
+
+  if (!state.messages.length) {
+    list.innerHTML = '<div class="loading">Сообщений пока нет</div>';
+    return;
+  }
+
+  const messagesToRender = appendFromIndex === null
+    ? state.messages
+    : state.messages.slice(appendFromIndex);
+
+  const markup = messagesToRender.map(message => {
+    const outgoing = message.direction === 'out';
+
+    const safeText = escapeHTML(
+      message.text_content || ''
+    ).replace(/\n/g, '<br>');
+
+    const media = rawMediaInfo(message.raw);
+
+    const imageMarkup = media.urls.map(url => {
+      const safe = escapeHTML(url);
+
+      return `<a class="message-image-link"
+        href="${safe}"
+        target="_blank"
+        rel="noopener noreferrer">
+        <img class="message-image"
+          src="${safe}"
+          loading="lazy"
+          alt="Изображение из переписки">
+      </a>`;
+    }).join('');
+
+    const voiceMarkup = media.voiceIds.map(id => `
+      <button class="voice-load-button"
+        type="button"
+        data-voice-id="${escapeHTML(id)}">
+        Загрузить голосовое
+      </button>
+    `).join('');
+
+    const typeFallback =
+      message.message_type &&
+      !['text', 'image', 'voice', 'deleted', 'system']
+        .includes(message.message_type)
+        ? `<div class="message-attachment-label">
+            Вложение: ${escapeHTML(message.message_type)}
+          </div>`
+        : '';
+
+    return `
+      <div class="message-row ${outgoing ? 'outgoing' : 'incoming'}">
+        <div class="message-bubble">
+          ${safeText
+            ? `<div class="message-text">${safeText}</div>`
+            : ''}
+          ${imageMarkup}
+          ${voiceMarkup}
+          ${typeFallback}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  if (appendFromIndex === null) {
+    list.innerHTML = markup;
+  } else if (markup) {
+    list.insertAdjacentHTML('beforeend', markup);
+  }
+
+  const voiceButtons = appendFromIndex === null
+    ? list.querySelectorAll('.voice-load-button')
+    : list.querySelectorAll(
+        '.voice-load-button:not([data-bound])'
+      );
+
+  voiceButtons.forEach(button => {
+    button.dataset.bound = 'true';
+
+    button.addEventListener('click', () => {
+      loadVoiceFile(button.dataset.voiceId, button);
+    });
+  });
+
+  if (scrollToBottom) {
+    list.scrollTop = list.scrollHeight;
+  } else if (appendFromIndex === null) {
+    list.scrollTop = previousScrollTop;
+  }
+}
+
+async function loadVoiceFile(voiceId, button) {
+  if (!state.activeChat) return;
+
+  button.disabled = true;
+  button.textContent = 'Загружаю…';
+
+  try {
+    const data = await api(`/api/chats/${encodeURIComponent(state.activeChat.chat_id)}/voice-files`, {
+      method: 'POST',
+      body: JSON.stringify({ voice_ids: [voiceId] })
+    });
+
+    const raw = data.files;
+    const candidates = [];
+
+    function walk(v) {
+      if (!v) return;
+      if (typeof v === 'string' && /^https:\/\//i.test(v)) candidates.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (typeof v === 'object') Object.values(v).forEach(walk);
+    }
+
+    walk(raw);
+
+    const url = candidates[0];
+
+    if (!url) throw new Error('Авито не вернуло ссылку на аудио');
+
+    const audio = document.createElement('audio');
+    audio.controls = true;
+    audio.preload = 'none';
+    audio.src = url;
+    audio.className = 'voice-player';
+
+    button.replaceWith(audio);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = error.message || 'Повторить загрузку';
+  }
+}
+
+// Обновление сообщений
+
+async function refreshActiveMessages() {
+  if (
+    !state.activeChat ||
+    state.messagesRefreshing
+  ) {
+    return;
+  }
+
+  const chatId = state.activeChat.chat_id;
+
+  state.messagesRefreshing = true;
+
+  const requestId = state.messagesRequestId;
+
+  try {
+    const data = await api(
+      `/api/chats/${encodeURIComponent(chatId)}/messages?limit=100`
+    );
+
+    if (
+      state.activeChat?.chat_id !== chatId ||
+      state.messagesRequestId !== requestId
+    ) {
+      return;
+    }
+
+    const newMessages = data.messages || [];
+
+    const oldMessages = state.messages;
+
+    const oldLastId = oldMessages.length
+      ? String(oldMessages[oldMessages.length - 1].message_id)
+      : null;
+
+    const newLastId = newMessages.length
+      ? String(newMessages[newMessages.length - 1].message_id)
+      : null;
+
+    if (
+      newMessages.length === oldMessages.length &&
+      oldLastId === newLastId
+    ) {
+      return;
+    }
+
+    const list = $('messages-list');
+
+    if (!list) return;
+
+    const nearBottom =
+      list.scrollHeight -
+      list.scrollTop -
+      list.clientHeight < 100;
+
+    let oldLastIndex = -1;
+
+    if (oldLastId !== null) {
+      oldLastIndex = newMessages.findIndex(
+        message =>
+          String(message.message_id) === oldLastId
+      );
+    }
+
+    state.messages = newMessages;
+
+    if (oldLastIndex >= 0) {
+      // Добавляем исключительно новые сообщения.
+      renderMessages(
+        nearBottom,
+        oldLastIndex + 1
+      );
+    } else {
+      // Если история изменилась полностью —
+      // перестраиваем список.
+      renderMessages(nearBottom);
+    }
+
+  } catch (error) {
+    console.error('MESSAGE_REFRESH_ERROR:', error);
+
+  } finally {
+    state.messagesRefreshing = false;
+  }
+}
+
+// Отправка сообщения
+
+async function sendCurrentMessage() {
+  if (state.sending || !state.activeChat) return;
+
+  const input = $('message-input');
+  const button = $('send-button');
+  const errorBox = $('send-error');
+
+  const text = input.value.trim();
+
+  errorBox.textContent = '';
+
+  if (!text) return;
+
+  if (text.length > 1000) {
+    errorBox.textContent =
+      'Максимальная длина сообщения — 1000 символов';
+    return;
+  }
+
+  state.sending = true;
+  button.disabled = true;
+
+  const chatId = state.activeChat.chat_id;
+
+  try {
+    const data = await api(
+      `/api/chats/${encodeURIComponent(chatId)}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ text })
+      }
+    );
+
+    if (data.sent && data.stored && data.message) {
+      state.messages.push(data.message);
+
+      // После отправки собственного сообщения прокручиваем вниз.
+      renderMessages(true);
+
+      input.value = '';
+      input.style.height = 'auto';
+
+      await loadChats();
+    } else {
+      errorBox.textContent =
+        data.error || 'Не удалось отправить сообщение';
+    }
+
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    state.sending = false;
+    button.disabled = false;
+    input.focus();
+  }
+}
+
+// Приватные заметки чата
+
+async function loadChatNote(chatId) {
+  const field = $('chat-note');
+
+  if (!field) return;
+
+  field.value = '';
+  $('chat-note-status').textContent = 'Загрузка…';
+
+  try {
+    const data = await api(`/api/chats/${encodeURIComponent(chatId)}/note`);
+
+    if (state.activeChat?.chat_id === chatId) {
+      field.value = data.note?.note || '';
+      $('chat-note-status').textContent = '';
+    }
+  } catch (error) {
+    $('chat-note-status').textContent = error.message;
+  }
+}
+
+async function saveChatNote() {
+  if (!state.activeChat) return;
+
+  const button = $('save-chat-note');
+  button.disabled = true;
+
+  try {
+    await api(`/api/chats/${encodeURIComponent(state.activeChat.chat_id)}/note`, {
+      method: 'PUT',
+      body: JSON.stringify({ note: $('chat-note').value })
+    });
+
+    $('chat-note-status').textContent = 'Сохранено';
+  } catch (error) {
+    $('chat-note-status').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Общие быстрые ответы
+
+async function loadQuickReplies() {
+  try {
+    const data = await api('/api/quick-replies');
+    state.quickReplies = data.quick_replies || [];
+
+    const select = $('quick-reply-select');
+
+    if (select) {
+      select.innerHTML = '<option value="">Быстрый ответ…</option>' + state.quickReplies.map(r => `<option value="${r.id}">${escapeHTML(r.category || 'Общие')} · ${escapeHTML(r.title)}</option>`).join('');
+    }
+
+    renderQuickReplyManager();
+  } catch (error) {
+    console.error('QUICK_REPLIES_LOAD_ERROR:', error);
+  }
+}
+
+function renderQuickReplyManager() {
+  const list = $('quick-replies-list');
+
+  if (!list) return;
+
+  list.innerHTML = state.quickReplies.map(r => `<div class="quick-reply-row"><div><strong>${escapeHTML(r.category || 'Общие')} · ${escapeHTML(r.title)}</strong><p>${escapeHTML(r.content)}</p></div><div class="quick-reply-row-actions"><button type="button" data-edit-reply="${r.id}">Изменить</button><button type="button" data-delete-reply="${r.id}">Удалить</button></div></div>`).join('') || '<p>Быстрых ответов пока нет</p>';
+
+  list.querySelectorAll('[data-edit-reply]').forEach(b => {
+    b.addEventListener('click', () => {
+      const r = state.quickReplies.find(x => x.id === Number(b.dataset.editReply));
+
+      if (!r) return;
+
+      $('quick-reply-id').value = r.id;
+      $('quick-reply-title').value = r.title;
+      $('quick-reply-category').value = r.category || 'Общие';
+      $('quick-reply-content').value = r.content;
+    });
+  });
+
+  list.querySelectorAll('[data-delete-reply]').forEach(b => {
+    b.addEventListener('click', async () => {
+      const id = Number(b.dataset.deleteReply);
+
+      if (!confirm('Удалить этот быстрый ответ?')) return;
+
+      try {
+        await api(`/api/quick-replies/${id}`, { method: 'DELETE' });
+        await loadQuickReplies();
+      } catch (e) {
+        alert(e.message);
+      }
+    });
+  });
+}
+
+function resetQuickReplyForm() {
+  $('quick-reply-id').value = '';
+  $('quick-reply-title').value = '';
+  $('quick-reply-category').value = 'Общие';
+  $('quick-reply-content').value = '';
+}
+
+async function saveQuickReply(event) {
+  event.preventDefault();
+
+  const id = $('quick-reply-id').value;
+
+  const payload = {
+    title: $('quick-reply-title').value,
+    category: $('quick-reply-category').value,
+    content: $('quick-reply-content').value
+  };
+
+  try {
+    await api(id ? `/api/quick-replies/${id}` : '/api/quick-replies', {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify(payload)
+    });
+
+    resetQuickReplyForm();
+    await loadQuickReplies();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function sendImageFile(file) {
+  if (!state.activeChat || !file) return;
+
+  const errorBox = $('send-error');
+  errorBox.textContent = '';
+
+  if (file.size > 24 * 1024 * 1024) {
+    errorBox.textContent = 'Максимальный размер фотографии — 24 МБ';
+    return;
+  }
+
+  const form = new FormData();
+  form.append('image', file, file.name);
+
+  const button = $('send-button');
+  button.disabled = true;
+
+  try {
+    const response = await fetch(`/api/chats/${encodeURIComponent(state.activeChat.chat_id)}/messages/image`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: form
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(data.error || `Ошибка ${response.status}`);
+    }
+
+    if (data.message) {
+      state.messages.push(data.message);
+      renderMessages(true);
+    }
+
+    await loadChats();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
+    $('image-input').value = '';
+  }
+}
+
+// Административная статистика
+
+async function loadAdminSummary() {
+  if (
+    state.adminSummaryLoading ||
+    state.user?.role !== 'admin'
+  ) {
+    return;
+  }
+
+  state.adminSummaryLoading = true;
+
+  try {
+    const data = await api('/api/chats/admin/summary');
+
+    $('admin-total-chats').textContent =
+      data.total_chats ?? 0;
+
+    $('admin-free-chats').textContent =
+      data.free_chats ?? 0;
+
+    state.adminManagers = data.managers || [];
+
+    const ivan = state.adminManagers.find(
+      item => item.email === 'very.ivan@proton.me'
+    );
+
+    const kirill = state.adminManagers.find(
+      item => item.email === 'very.kirill@proton.me'
+    );
+
+    $('admin-ivan-chats').textContent =
+      ivan?.assigned_chats ?? 0;
+
+    $('admin-kirill-chats').textContent =
+      kirill?.assigned_chats ?? 0;
+
+    renderChats();
+
+  } catch (error) {
+    console.error('ADMIN_SUMMARY_ERROR:', error);
+
+    const errorBox = $('admin-stats-error');
+
+    if (errorBox) {
+      errorBox.textContent = error.message;
+    }
+  } finally {
+    state.adminSummaryLoading = false;
+  }
+}
+
+// Назначение чата администратором
+
+async function assignActiveChat(managerEmail) {
+  if (
+    !state.activeChat ||
+    state.user?.role !== 'admin' ||
+    state.adminAssigning
+  ) {
+    return;
+  }
+
+  state.adminAssigning = true;
+
+  const errorBox = $('admin-assign-error');
+
+  if (errorBox) {
+    errorBox.textContent = '';
+  }
+
+  try {
+    await api(
+      `/api/chats/${encodeURIComponent(
+        state.activeChat.chat_id
+      )}/assign`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          manager_email: managerEmail || null
+        })
+      }
+    );
+
+    await loadChats();
+    await loadAdminSummary();
+
+  } catch (error) {
+    console.error('ADMIN_ASSIGN_ERROR:', error);
+
+    if (errorBox) {
+      errorBox.textContent = error.message;
+    }
+  } finally {
+    state.adminAssigning = false;
+  }
+}
+
+// Вспомогательные функции
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(
+    /[&<>"']/g,
+    character => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;'
+    })[character]
+  );
+}
+
+// Обработчики интерфейса
+
+$('login-form').addEventListener('submit', async event => {
+  event.preventDefault();
+
+  const email = $('login-email').value.trim();
+  const password = $('login-password').value;
+
+  const errorBox = $('login-error');
+
+  errorBox.textContent = '';
+
+  try {
+    const data = await login(email, password);
+
+    state.user = data.user;
+
+    $('login-password').value = '';
+
+    await showCRM();
+
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+});
+
+$('logout-button').addEventListener('click', logout);
+
+$('refresh-chats').addEventListener('click', loadChats);
+
+if ($('refresh-admin-stats')) {
+  $('refresh-admin-stats').addEventListener(
+    'click',
+    loadAdminSummary
+  );
+}
+
+$('chat-search').addEventListener('input', renderChats);
+
+document.querySelectorAll('.filter').forEach(button => {
+  button.addEventListener('click', () => {
+    document.querySelectorAll('.filter').forEach(item => {
+      item.classList.remove('active');
+    });
+
+    button.classList.add('active');
+
+    state.filter = button.dataset.filter;
+
+    renderChats();
+  });
+});
+
+$('claim-chat').addEventListener('click', async () => {
+  if (!state.activeChat) return;
+
+  const button = $('claim-chat');
+
+  button.disabled = true;
+
+  try {
+    await api(
+      `/api/chats/${encodeURIComponent(
+        state.activeChat.chat_id
+      )}/claim`,
+      {
+        method: 'POST'
+      }
+    );
+
+    await loadChats();
+
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('send-button').addEventListener(
+  'click',
+  sendCurrentMessage
+);
+
+$('message-input').addEventListener('keydown', event => {
+  if (
+    event.key === 'Enter' &&
+    !event.shiftKey
+  ) {
+    event.preventDefault();
+    sendCurrentMessage();
+  }
+});
+
+$('message-input').addEventListener('input', event => {
+  const textarea = event.target;
+
+  textarea.style.height = 'auto';
+
+  textarea.style.height =
+    `${Math.min(textarea.scrollHeight, 140)}px`;
+});
+
+if ($('admin-assign-chat')) {
+  $('admin-assign-chat').addEventListener('click', () => {
+    assignActiveChat(
+      $('admin-manager-select').value
+    );
+  });
+}
+
+if ($('admin-release-chat')) {
+  $('admin-release-chat').addEventListener('click', () => {
+    assignActiveChat('');
+  });
+}
+
+if ($('save-chat-note')) {
+  $('save-chat-note').addEventListener('click', saveChatNote);
+}
+
+if ($('quick-replies-manage')) {
+  $('quick-replies-manage').addEventListener('click', () => $('quick-replies-dialog').showModal());
+}
+
+if ($('quick-replies-close')) {
+  $('quick-replies-close').addEventListener('click', () => $('quick-replies-dialog').close());
+}
+
+if ($('quick-reply-form')) {
+  $('quick-reply-form').addEventListener('submit', saveQuickReply);
+}
+
+if ($('quick-reply-reset')) {
+  $('quick-reply-reset').addEventListener('click', resetQuickReplyForm);
+}
+
+if ($('quick-reply-select')) {
+  $('quick-reply-select').addEventListener('change', () => {
+    const item = state.quickReplies.find(r => r.id === Number($('quick-reply-select').value));
+
+    if (item) {
+      const input = $('message-input');
+      input.value = input.value ? `${input.value}\n${item.content}` : item.content;
+      input.dispatchEvent(new Event('input'));
+      input.focus();
+      $('quick-reply-select').value = '';
+    }
+  });
+}
+
+if ($('image-input')) {
+  $('image-input').addEventListener('change', event => sendImageFile(event.target.files?.[0]));
+}
+
+// Автообновление списка чатов
+
+setInterval(() => {
+  if (state.user) {
+    loadChats();
+  }
+}, 2000);
+
+// Обновление административной статистики
+
+setInterval(() => {
+  if (state.user?.role === 'admin') {
+    loadAdminSummary();
+  }
+}, 2000);
+
+// Автообновление открытой переписки
+
+setInterval(() => {
+  if (state.user && state.activeChat) {
+    refreshActiveMessages();
+  }
+}, 1500);
+
+// Проверяем существующую сессию
+
+checkSession();

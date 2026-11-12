@@ -1,0 +1,354 @@
+
+'use strict';
+
+const { authenticate, requireRole } = require('../middleware/auth');
+
+async function chatsRoutes(app) {
+
+  // ==========================================
+  // АДМИНИСТРАТИВНАЯ СТАТИСТИКА
+  // Только для администратора
+  // ==========================================
+
+  app.get('/admin/summary', {
+    preHandler: [
+      authenticate,
+      requireRole('admin')
+    ]
+  }, async (request, reply) => {
+
+    try {
+      // Общее количество и свободные чаты
+      const totals = await app.pg.query(`
+        SELECT
+          COUNT(c.chat_id)::integer AS total_chats,
+
+          COUNT(c.chat_id) FILTER (
+            WHERE ca.manager_email IS NULL
+          )::integer AS free_chats
+
+        FROM chats c
+
+        LEFT JOIN chat_assignments ca
+          ON ca.chat_id = c.chat_id
+      `);
+
+      // Количество чатов каждого менеджера
+      const managers = await app.pg.query(`
+        SELECT
+          u.email,
+          u.display_name,
+          COUNT(ca.chat_id)::integer AS assigned_chats
+
+        FROM crm_users u
+
+        LEFT JOIN chat_assignments ca
+          ON ca.manager_email = u.email
+
+        WHERE u.role = 'manager'
+
+        GROUP BY
+          u.email,
+          u.display_name
+
+        ORDER BY u.display_name
+      `);
+
+      return {
+        success: true,
+        total_chats: totals.rows[0].total_chats,
+        free_chats: totals.rows[0].free_chats,
+        managers: managers.rows
+      };
+
+    } catch (error) {
+      request.log.error(error);
+
+      return reply.code(500).send({
+        error: 'Не удалось получить статистику чатов'
+      });
+    }
+  });
+
+
+  // ==========================================
+  // ПОЛУЧЕНИЕ СПИСКА ЧАТОВ
+  // ==========================================
+
+  app.get('/', {
+    preHandler: [
+      authenticate,
+      requireRole('admin', 'manager')
+    ]
+  }, async (request) => {
+
+    const user = request.user;
+
+    const params = [];
+    let accessFilter = '';
+
+    // Менеджер видит только свободные и свои чаты
+    if (user.role === 'manager') {
+      params.push(user.email);
+
+      accessFilter = `
+        WHERE ca.manager_email IS NULL
+           OR ca.manager_email = $1
+      `;
+    }
+
+    const result = await app.pg.query(
+      `SELECT
+         c.chat_id,
+         c.peer_id,
+         c.peer_name,
+         c.item_title,
+         c.item_url,
+         c.raw,
+         c.raw #>> '{context,value,images,main,140x105}'
+  AS item_image_url,
+         c.last_message_id,
+         c.last_message_at,
+         c.last_synced_at,
+         ca.manager_email,
+         COALESCE(ca.status, 'free') AS status,
+         COALESCE(ca.order_id, '') AS order_id
+
+       FROM chats c
+
+       LEFT JOIN chat_assignments ca
+         ON ca.chat_id = c.chat_id
+
+       ${accessFilter}
+
+       ORDER BY c.last_message_at DESC NULLS LAST`,
+      params
+    );
+
+    return {
+      success: true,
+      chats: result.rows
+    };
+  });
+
+
+  // ==========================================
+  // МЕНЕДЖЕР ЗАБИРАЕТ СВОБОДНЫЙ ЧАТ
+  // ==========================================
+
+  app.post('/:chatId/claim', {
+    preHandler: [
+      authenticate,
+      requireRole('manager')
+    ]
+  }, async (request, reply) => {
+
+    const chatId = String(
+      request.params.chatId || ''
+    ).trim();
+
+    if (!chatId || chatId.length > 200) {
+      return reply.code(400).send({
+        error: 'Некорректный ID чата'
+      });
+    }
+
+    const client = await app.pg.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Блокируем чат на время назначения
+      const chat = await client.query(
+        `SELECT chat_id
+         FROM chats
+         WHERE chat_id = $1
+         FOR UPDATE`,
+        [chatId]
+      );
+
+      if (!chat.rows.length) {
+        await client.query('ROLLBACK');
+
+        return reply.code(404).send({
+          error: 'Чат не найден'
+        });
+      }
+
+      const assignment = await client.query(
+        `SELECT manager_email
+         FROM chat_assignments
+         WHERE chat_id = $1
+         FOR UPDATE`,
+        [chatId]
+      );
+
+      // Проверяем, не закреплён ли чат за другим менеджером
+      if (
+        assignment.rows.length &&
+        assignment.rows[0].manager_email &&
+        assignment.rows[0].manager_email !== request.user.email
+      ) {
+        await client.query('ROLLBACK');
+
+        return reply.code(409).send({
+          error: 'Чат уже закреплён за другим менеджером'
+        });
+      }
+
+      await client.query(
+        `INSERT INTO chat_assignments
+          (chat_id, manager_email, status, updated_at)
+
+         VALUES ($1, $2, 'assigned', now())
+
+         ON CONFLICT (chat_id)
+
+         DO UPDATE SET
+           manager_email = EXCLUDED.manager_email,
+           status = 'assigned',
+           updated_at = now()`,
+        [chatId, request.user.email]
+      );
+
+      await client.query('COMMIT');
+
+      return {
+        success: true,
+        message: 'Чат закреплён за вами',
+        chat_id: chatId,
+        manager_email: request.user.email
+      };
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+
+    } finally {
+      client.release();
+    }
+  });
+
+
+  // ==========================================
+  // АДМИНИСТРАТОР НАЗНАЧАЕТ ИЛИ ОСВОБОЖДАЕТ ЧАТ
+  // ==========================================
+
+  app.post('/:chatId/assign', {
+    preHandler: [
+      authenticate,
+      requireRole('admin')
+    ]
+  }, async (request, reply) => {
+
+    const chatId = String(
+      request.params.chatId || ''
+    ).trim();
+
+    const managerEmail = request.body?.manager_email;
+
+    if (!chatId || chatId.length > 200) {
+      return reply.code(400).send({
+        error: 'Некорректный ID чата'
+      });
+    }
+
+    if (
+      managerEmail !== null &&
+      (
+        typeof managerEmail !== 'string' ||
+        !managerEmail.trim()
+      )
+    ) {
+      return reply.code(400).send({
+        error: 'Укажи email менеджера или null для освобождения чата'
+      });
+    }
+
+    const normalizedEmail = managerEmail === null
+      ? null
+      : managerEmail.trim().toLowerCase();
+
+    const client = await app.pg.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Блокируем чат
+      const chat = await client.query(
+        `SELECT chat_id
+         FROM chats
+         WHERE chat_id = $1
+         FOR UPDATE`,
+        [chatId]
+      );
+
+      if (!chat.rows.length) {
+        await client.query('ROLLBACK');
+
+        return reply.code(404).send({
+          error: 'Чат не найден'
+        });
+      }
+
+      // Проверяем существование менеджера
+      if (normalizedEmail !== null) {
+
+        const manager = await client.query(
+          `SELECT email
+           FROM crm_users
+           WHERE email = $1
+             AND role = 'manager'`,
+          [normalizedEmail]
+        );
+
+        if (!manager.rows.length) {
+          await client.query('ROLLBACK');
+
+          return reply.code(400).send({
+            error: 'Менеджер не найден'
+          });
+        }
+      }
+
+      // Назначение или освобождение
+      await client.query(
+        `INSERT INTO chat_assignments
+          (chat_id, manager_email, status, updated_at)
+
+         VALUES ($1, $2, $3, now())
+
+         ON CONFLICT (chat_id)
+
+         DO UPDATE SET
+           manager_email = EXCLUDED.manager_email,
+           status = EXCLUDED.status,
+           updated_at = now()`,
+        [
+          chatId,
+          normalizedEmail,
+          normalizedEmail ? 'assigned' : 'free'
+        ]
+      );
+
+      await client.query('COMMIT');
+
+      return {
+        success: true,
+        chat_id: chatId,
+        manager_email: normalizedEmail,
+        status: normalizedEmail ? 'assigned' : 'free'
+      };
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+
+    } finally {
+      client.release();
+    }
+  });
+
+}
+
+module.exports = chatsRoutes;
